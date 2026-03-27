@@ -1,48 +1,39 @@
-# InternIQ - Phase 1 Setup
+# Job Finder
 
-This workspace contains the Phase 1 foundation for InternIQ:
+InternIQ is a distributed, AI-powered internship job aggregator. It ingests listings from community sources, then uses an AI agent to validate job links, detect stale or removed postings, and extract key details from job descriptions for frontend filtering.
 
-- Monorepo folders: `frontend`, `api`, `worker`, `ingestor`
-- Local infrastructure via Docker Compose: PostgreSQL 15 + Redis 7
-- Initial database migration mounted into PostgreSQL init directory
-- Service stubs for API, worker, and ingestor so all services can boot and communicate
+## Status
 
-## 1. Prerequisites
+In Progress
 
-- Docker Desktop
-- Docker Compose (included with Docker Desktop)
+## What This Project Includes
 
-## 2. Create local env file
+- Ingestor service for pulling and normalizing job listings
+- API service for health checks and data access
+- Worker service that runs an AI agent to check listing validity and extract filterable metadata
+- Local infrastructure with PostgreSQL and Redis via Docker Compose
+- Frontend workspace for the dashboard application
 
-Copy `.env.example` to `.env`.
+## Tech Stack
 
-On PowerShell:
+- Python
+- FastAPI
+- PostgreSQL
+- Redis
+- Docker
+- TypeScript and React
 
-```powershell
-Copy-Item .env.example .env
-```
+## Tools and Frameworks
 
-## 3. Start all services
+- Pydantic
+- SQLAlchemy
+- httpx
+- LangChain
 
-```powershell
-docker compose up --build
-```
+## Repository Layout
 
-## 4. Verify health
-
-- API health endpoint: `http://localhost:8000/health`
-- API root endpoint: `http://localhost:8000/`
-
-A healthy response should report both `postgres` and `redis` as `ok`.
-
-## 5. Stop services
-
-```powershell
-docker compose down
-```
-
-Use the command below to also remove volumes if you need a clean DB reset:
-
-```powershell
-docker compose down -v
-```
+- frontend
+- api
+- worker
+- ingestor
+- infra
