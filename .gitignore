@@ -20,3 +20,5 @@ Thumbs.db
 
 # Data
 *.log
+logs/
+InternIQ_PRD_v2.md
