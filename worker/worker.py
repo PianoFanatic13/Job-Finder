@@ -15,6 +15,48 @@ MIN_CANDIDATE_CHARS = 120
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_CHARS = 12000
 
+SECTION_HEADING_TERMS = [
+    "responsibilities",
+    "what you'll do",
+    "what you will do",
+    "qualifications",
+    "minimum qualifications",
+    "preferred qualifications",
+    "requirements",
+    "about the team",
+    "job description",
+]
+
+NOISE_KEYWORDS = [
+    "nav",
+    "menu",
+    "header",
+    "footer",
+    "cookie",
+    "language",
+    "locale",
+    "social",
+    "breadcrumb",
+    "legal",
+    "policy",
+]
+
+BOILERPLATE_TOKENS = [
+    "privacy policy",
+    "terms of service",
+    "candidate privacy policy",
+    "community guidelines",
+    "help center",
+    "language",
+]
+
+BOILERPLATE_ANCHORS = [
+    "job code",
+    "responsibilities",
+    "qualifications",
+    "about the team",
+]
+
 SCRAPE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -72,6 +114,10 @@ class JobMetadata(BaseModel):
 
 
 def _extract_text_from_json_node(node: Any) -> str:
+    """Extract useful long strings from generic JSON structures.
+
+    This acts as a broad fallback when a clear JobPosting schema is not present.
+    """
     collected: List[str] = []
 
     def walk(value: Any, parent_key: str = "") -> None:
@@ -108,10 +154,18 @@ def _extract_text_from_json_node(node: Any) -> str:
 
 
 def _normalize_text(value: str) -> str:
+    """Collapse repeated whitespace into single spaces.
+
+    Normalization keeps scoring and downstream extraction consistent across pages.
+    """
     return " ".join(value.split())
 
 
 def _extract_jobposting_from_json(node: Any) -> Optional[str]:
+    """Extract title/description style text from JSON-LD JobPosting payloads.
+
+    This is the highest-signal path when sites expose structured job metadata.
+    """
     postings: List[dict[str, Any]] = []
 
     def walk(value: Any) -> None:
@@ -160,6 +214,10 @@ def _extract_jobposting_from_json(node: Any) -> Optional[str]:
 
 
 def _score_candidate_text(text: str) -> float:
+    """Score extracted text by job-signal keywords and boilerplate penalties.
+
+    Higher scores indicate text that is more likely to contain job requirements.
+    """
     lowered = text.lower()
 
     positive_terms = [
@@ -189,6 +247,10 @@ def _score_candidate_text(text: str) -> float:
 
 
 def _pick_best_candidate(candidates: List[str]) -> Optional[str]:
+    """Choose the best candidate, preferring richer job-like text.
+
+    If no candidate meets the preferred length threshold, choose the longest one.
+    """
     non_empty = [c for c in candidates if c]
     if not non_empty:
         return None
@@ -201,6 +263,10 @@ def _pick_best_candidate(candidates: List[str]) -> Optional[str]:
 
 
 def _safe_text(node: Any) -> str:
+    """Safely get normalized text from a BeautifulSoup node.
+
+    This prevents malformed tags from crashing the scraper pipeline.
+    """
     if node is None:
         return ""
 
@@ -215,6 +281,10 @@ def _safe_text(node: Any) -> str:
 
 
 def _safe_tag_attr_text(node: Any, key: str) -> str:
+    """Safely read a BeautifulSoup tag attribute as a string.
+
+    Attribute values may be missing, strings, or lists depending on the tag.
+    """
     attrs = getattr(node, "attrs", None)
     if not isinstance(attrs, dict):
         return ""
@@ -230,22 +300,15 @@ def _safe_tag_attr_text(node: Any, key: str) -> str:
 
 
 def _extract_section_candidates(soup: BeautifulSoup) -> List[str]:
+    """Collect text blocks near headings like Responsibilities and Qualifications.
+
+    Section extraction helps recover key details when page-level text is noisy.
+    """
     section_candidates: List[str] = []
-    heading_terms = [
-        "responsibilities",
-        "what you'll do",
-        "what you will do",
-        "qualifications",
-        "minimum qualifications",
-        "preferred qualifications",
-        "requirements",
-        "about the team",
-        "job description",
-    ]
 
     for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "strong", "b"]):
         heading_text = _safe_text(heading).lower()
-        if not heading_text or not any(term in heading_text for term in heading_terms):
+        if not heading_text or not any(term in heading_text for term in SECTION_HEADING_TERMS):
             continue
 
         blocks: List[str] = []
@@ -273,6 +336,10 @@ def _extract_section_candidates(soup: BeautifulSoup) -> List[str]:
 
 
 def _iter_json_payloads(soup: BeautifulSoup) -> List[Any]:
+    """Parse and return JSON payloads found in script tags.
+
+    Many job pages embed structured data in JSON or JSON-LD script tags.
+    """
     payloads: List[Any] = []
 
     for script in soup.find_all("script"):
@@ -299,6 +366,10 @@ def _iter_json_payloads(soup: BeautifulSoup) -> List[Any]:
 
 
 def _collect_json_candidates(soup: BeautifulSoup) -> List[str]:
+    """Create text candidates from structured and unstructured JSON payloads.
+
+    Tries explicit JobPosting extraction first, then falls back to generic JSON text.
+    """
     candidates: List[str] = []
 
     for payload in _iter_json_payloads(soup):
@@ -315,25 +386,15 @@ def _collect_json_candidates(soup: BeautifulSoup) -> List[str]:
 
 
 def _remove_noise_elements(soup: BeautifulSoup) -> None:
+    """Remove known non-content containers like nav/footer/cookie blocks.
+
+    This reduces the chance that menus and policy text dominate extracted content.
+    """
     for tag in soup(["script", "style", "noscript", "svg", "form"]):
         try:
             tag.decompose()
         except Exception:
             continue
-
-    noise_keywords = [
-        "nav",
-        "menu",
-        "header",
-        "footer",
-        "cookie",
-        "language",
-        "locale",
-        "social",
-        "breadcrumb",
-        "legal",
-        "policy",
-    ]
 
     elements_to_remove: List[Any] = []
     for element in soup.find_all(True):
@@ -349,7 +410,7 @@ def _remove_noise_elements(soup: BeautifulSoup) -> None:
             ]
         ).lower()
 
-        if any(keyword in haystack for keyword in noise_keywords):
+        if any(keyword in haystack for keyword in NOISE_KEYWORDS):
             elements_to_remove.append(element)
 
     for element in elements_to_remove:
@@ -360,6 +421,10 @@ def _remove_noise_elements(soup: BeautifulSoup) -> None:
 
 
 def _extract_main_candidate(soup: BeautifulSoup) -> str:
+    """Extract text from the most likely main job content container.
+
+    Uses a priority order of selectors commonly seen on job detail pages.
+    """
     content_root = (
         soup.find("article")
         or soup.find("main")
@@ -376,6 +441,10 @@ def _extract_main_candidate(soup: BeautifulSoup) -> str:
 
 
 def _collect_candidates_from_html(html: str) -> List[str]:
+    """Build extraction candidates from sections, JSON payloads, and HTML fallbacks.
+
+    Candidate diversity improves resilience across Greenhouse, Workday, and custom sites.
+    """
     candidates: List[str] = []
 
     original_soup = BeautifulSoup(html, "html.parser")
@@ -404,27 +473,21 @@ def _collect_candidates_from_html(html: str) -> List[str]:
 
 
 def _trim_leading_boilerplate(text: str) -> str:
-    lowered = text.lower()
-    noise_tokens = [
-        "privacy policy",
-        "terms of service",
-        "candidate privacy policy",
-        "community guidelines",
-        "help center",
-        "language",
-    ]
-    anchors = [
-        "job code",
-        "responsibilities",
-        "qualifications",
-        "about the team",
-    ]
+    """Trim leading site boilerplate when job anchors are present later.
 
-    has_noise = any(token in lowered[:1500] for token in noise_tokens)
+    This keeps legal and navigation text from appearing ahead of real job content.
+    """
+    lowered = text.lower()
+
+    has_noise = any(token in lowered[:1500] for token in BOILERPLATE_TOKENS)
     if not has_noise:
         return text
 
-    anchor_indexes = [lowered.find(anchor) for anchor in anchors if lowered.find(anchor) != -1]
+    anchor_indexes = [
+        lowered.find(anchor)
+        for anchor in BOILERPLATE_ANCHORS
+        if lowered.find(anchor) != -1
+    ]
     if not anchor_indexes:
         return text
 
@@ -439,6 +502,11 @@ def scrape_job_page(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> Optional[str]:
+    """Fetch a job page and return cleaned plain text for metadata extraction.
+
+    The function combines structured-data parsing and HTML fallbacks, then selects
+    the strongest candidate for downstream LLM parsing.
+    """
 
     try:
         response = httpx.get(
@@ -474,6 +542,10 @@ def scrape_job_page(
         return None
 
 def wait_for_dependencies(max_retries: int = 30, sleep_seconds: int = 2) -> None:
+    """Block until Postgres and Redis are reachable.
+
+    Worker startup should fail early when required infrastructure is unavailable.
+    """
     if not DATABASE_URL or not REDIS_URL:
         raise RuntimeError("DATABASE_URL and REDIS_URL must be set")
 
