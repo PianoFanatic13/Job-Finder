@@ -1,16 +1,21 @@
 import os
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 import httpx
 import redis
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import create_engine, text
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MIN_CANDIDATE_CHARS = 120
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_CHARS = 12000
@@ -541,6 +546,154 @@ def scrape_job_page(
         print(f"scrape_job_page unexpected error for {url}: {e}")
         return None
 
+_EXTRACT_PROMPT_TEMPLATE = """\
+You are a structured data extractor for software engineering job postings.
+
+Extract all fields from the job description below and return them as structured data.
+Follow each field's description exactly. When information is not present, use null or
+false as appropriate — do not guess or hallucinate values.
+
+Job description:
+{raw_text}"""
+
+_VALID_GRAD_YEAR_RANGE = range(2024, 2031)
+_MAX_HOURLY_PAY = 500
+
+
+def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata]:
+    """Extract structured job metadata from scraped plain text using Gemini.
+
+    Returns a validated JobMetadata object, or None if extraction fails.
+    Pass a pre-built structured_llm to skip LLM construction (useful for testing).
+    """
+    if not raw_text or not raw_text.strip():
+        return None
+
+    try:
+        if structured_llm is None:
+            llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL,
+                temperature=0,
+                google_api_key=GEMINI_API_KEY,
+            )
+            structured_llm = llm.with_structured_output(JobMetadata)
+
+        prompt = _EXTRACT_PROMPT_TEMPLATE.format(raw_text=raw_text)
+        result: JobMetadata = structured_llm.invoke([HumanMessage(content=prompt)])
+
+        # Hallucination guards
+        if result.required_grad_year is not None and result.required_grad_year not in _VALID_GRAD_YEAR_RANGE:
+            result.required_grad_year = None
+
+        if result.estimated_pay is not None and result.salary_unit == "hourly" and result.estimated_pay > _MAX_HOURLY_PAY:
+            result.estimated_pay = None
+            result.salary_unit = None
+
+        if result.tech_stack:
+            seen: set[str] = set()
+            deduped: List[str] = []
+            for tech in result.tech_stack:
+                normalized = tech.lower().strip()
+                if normalized not in seen:
+                    seen.add(normalized)
+                    deduped.append(normalized)
+            result.tech_stack = deduped
+
+        return result
+
+    except (ValidationError, Exception) as e:
+        print(f"extract_metadata failed: {e}")
+        return None
+
+
+_UPSERT_SQL = text("""
+INSERT INTO jobs (
+    url, url_hash, company_name, title, location, is_remote,
+    required_grad_year, grad_year_flexible, estimated_salary_low,
+    salary_unit, tech_stack, sponsors_visa, raw_description,
+    ai_extraction_status, ai_confidence_score, source,
+    date_posted, date_processed
+) VALUES (
+    :url, :url_hash, :company_name, :title, :location, :is_remote,
+    :required_grad_year, :grad_year_flexible, :estimated_salary_low,
+    :salary_unit, :tech_stack, :sponsors_visa, :raw_description,
+    :ai_extraction_status, :ai_confidence_score, :source,
+    :date_posted, :date_processed
+)
+ON CONFLICT (url) DO UPDATE SET
+    company_name         = EXCLUDED.company_name,
+    title                = EXCLUDED.title,
+    location             = EXCLUDED.location,
+    is_remote            = EXCLUDED.is_remote,
+    required_grad_year   = EXCLUDED.required_grad_year,
+    grad_year_flexible   = EXCLUDED.grad_year_flexible,
+    estimated_salary_low = EXCLUDED.estimated_salary_low,
+    salary_unit          = EXCLUDED.salary_unit,
+    tech_stack           = EXCLUDED.tech_stack,
+    sponsors_visa        = EXCLUDED.sponsors_visa,
+    raw_description      = EXCLUDED.raw_description,
+    ai_extraction_status = EXCLUDED.ai_extraction_status,
+    ai_confidence_score  = EXCLUDED.ai_confidence_score,
+    date_processed       = EXCLUDED.date_processed
+RETURNING id
+""")
+
+_CONFIDENCE_THRESHOLD = 0.6
+
+
+def save_to_database(
+    job_stream_data: dict,
+    metadata: JobMetadata,
+    raw_text: str,
+    engine=None,
+) -> Optional[str]:
+    """Upsert an enriched job record into PostgreSQL and return its UUID.
+
+    Accepts an injectable engine for testing. When engine is None, creates one
+    from DATABASE_URL — callers should reuse a single engine across multiple jobs.
+    """
+    try:
+        if engine is None:
+            engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+        status = "success" if metadata.confidence_score >= _CONFIDENCE_THRESHOLD else "partial"
+
+        date_posted_str = job_stream_data.get("date_posted", "0")
+        date_posted = datetime.fromtimestamp(int(date_posted_str), tz=timezone.utc)
+        date_processed = datetime.now(tz=timezone.utc)
+
+        params = {
+            "url": job_stream_data["url"],
+            "url_hash": job_stream_data["url_hash"],
+            "company_name": metadata.company_name,
+            "title": metadata.title,
+            "location": metadata.location,
+            "is_remote": metadata.is_remote,
+            "required_grad_year": metadata.required_grad_year,
+            "grad_year_flexible": metadata.grad_year_flexible,
+            "estimated_salary_low": metadata.estimated_pay,
+            "salary_unit": metadata.salary_unit,
+            "tech_stack": metadata.tech_stack,
+            "sponsors_visa": metadata.sponsors_visa,
+            "raw_description": raw_text,
+            "ai_extraction_status": status,
+            "ai_confidence_score": metadata.confidence_score,
+            "source": job_stream_data.get("source"),
+            "date_posted": date_posted,
+            "date_processed": date_processed,
+        }
+
+        with engine.connect() as conn:
+            result = conn.execute(_UPSERT_SQL, params)
+            conn.commit()
+            row = result.fetchone()
+            return str(row[0]) if row else None
+
+    except Exception as e:
+        print(f"save_to_database failed: {e}")
+        return None
+
+
 def wait_for_dependencies(max_retries: int = 30, sleep_seconds: int = 2) -> None:
     """Block until Postgres and Redis are reachable.
 
@@ -584,6 +737,41 @@ def main() -> None:
     print(f"Extracted characters: {len(scraped_text)}")
     print("Preview (first 2000 chars):")
     print(scraped_text[:2000])
+
+    print("\n--- extract_metadata smoke test ---")
+    metadata = extract_metadata(scraped_text)
+    if metadata:
+        print(f"Company:    {metadata.company_name}")
+        print(f"Title:      {metadata.title}")
+        print(f"Location:   {metadata.location}")
+        print(f"Grad year:  {metadata.required_grad_year}")
+        print(f"Pay:        {metadata.estimated_pay} ({metadata.salary_unit})")
+        print(f"Tech stack: {metadata.tech_stack}")
+        print(f"Visa:       {metadata.sponsors_visa}")
+        print(f"Confidence: {metadata.confidence_score}")
+    else:
+        print("extract_metadata returned None")
+
+    print("\n--- save_to_database smoke test ---")
+    if metadata:
+        db_engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        job_id = save_to_database(
+            job_stream_data={
+                "url": test_url,
+                "url_hash": "smoketest_hash_billiontoone",
+                "source": "manual",
+                "date_posted": "1748995200",
+            },
+            metadata=metadata,
+            raw_text=scraped_text or "",
+            engine=db_engine,
+        )
+        if job_id:
+            print(f"Saved job UUID: {job_id}")
+        else:
+            print("save_to_database returned None")
+    else:
+        print("Skipped — no metadata to save")
 
 
 if __name__ == "__main__":
