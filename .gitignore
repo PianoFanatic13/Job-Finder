@@ -8,6 +8,9 @@ venv/
 .env
 .env.example
 
+worker/test_worker.py
+worker/check_jobs.py
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

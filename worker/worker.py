@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, List, Optional
@@ -15,7 +16,11 @@ from sqlalchemy import create_engine, text
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+JOBS_RAW_STREAM_KEY = os.getenv("JOBS_RAW_STREAM_KEY", "jobs:raw")
+WORKER_GROUP = "worker-group"
+WORKER_CONSUMER = "worker-1"
+RATE_LIMIT_SLEEP_SECONDS = 5
 MIN_CANDIDATE_CHARS = 120
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_CHARS = 12000
@@ -71,6 +76,18 @@ SCRAPE_HEADERS = {
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
+
+
+class RateLimitError(Exception):
+    def __init__(self, retry_after: int = 65):
+        self.retry_after = retry_after
+        super().__init__(f"rate limited, retry after {retry_after}s")
+
+
+def _parse_retry_delay(error_str: str, default: int = 65) -> int:
+    match = re.search(r"retry in (\d+)", error_str, re.IGNORECASE)
+    return int(match.group(1)) + 5 if match else default
+
 
 class JobMetadata(BaseModel):
     company_name: str = Field(description="Company name")
@@ -602,6 +619,9 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
         return result
 
     except (ValidationError, Exception) as e:
+        err_str = str(e)
+        if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+            raise RateLimitError(_parse_retry_delay(err_str))
         print(f"extract_metadata failed: {e}")
         return None
 
@@ -694,6 +714,67 @@ def save_to_database(
         return None
 
 
+def _process_one_job(fields: dict, engine) -> Optional[str]:
+    url = fields.get("url", "")
+
+    raw_text = scrape_job_page(url)
+    if not raw_text:
+        print(f"_process_one_job scrape returned nothing for {url}")
+        return None
+
+    metadata = extract_metadata(raw_text)
+    if not metadata:
+        print(f"_process_one_job extract returned nothing for {url}")
+        return None
+
+    return save_to_database(fields, metadata, raw_text, engine=engine)
+
+
+def run_consumer_loop(redis_client, engine) -> None:
+    try:
+        redis_client.xgroup_create(JOBS_RAW_STREAM_KEY, WORKER_GROUP, id="0", mkstream=True)
+        print(f"consumer group '{WORKER_GROUP}' created")
+    except redis.exceptions.ResponseError as e:
+        if "BUSYGROUP" not in str(e):
+            raise
+        print(f"consumer group '{WORKER_GROUP}' already exists, resuming")
+
+    processed = 0
+    failed = 0
+
+    while True:
+        messages = redis_client.xreadgroup(
+            WORKER_GROUP,
+            WORKER_CONSUMER,
+            {JOBS_RAW_STREAM_KEY: ">"},
+            count=1,
+            block=5000,
+        )
+
+        if not messages:
+            continue
+
+        _, entries = messages[0]
+        msg_id, fields = entries[0]
+        url = fields.get("url", "unknown")
+
+        print(f"\n[{processed + failed + 1}] {url}")
+
+        try:
+            job_id = _process_one_job(fields, engine)
+            if job_id:
+                processed += 1
+                print(f"  saved {job_id}  (ok={processed} fail={failed})")
+            else:
+                failed += 1
+                print(f"  skipped  (ok={processed} fail={failed})")
+            redis_client.xack(JOBS_RAW_STREAM_KEY, WORKER_GROUP, msg_id)
+            time.sleep(RATE_LIMIT_SLEEP_SECONDS)
+        except RateLimitError as e:
+            print(f"  rate limited — sleeping {e.retry_after}s, message stays pending for retry")
+            time.sleep(e.retry_after)
+
+
 def wait_for_dependencies(max_retries: int = 30, sleep_seconds: int = 2) -> None:
     """Block until Postgres and Redis are reachable.
 
@@ -720,58 +801,11 @@ def wait_for_dependencies(max_retries: int = 30, sleep_seconds: int = 2) -> None
 
 
 def main() -> None:
-    test_url = "https://job-boards.greenhouse.io/billiontoone/jobs/4680728005"
-    test2_url = "https://snyk.wd103.myworkdayjobs.com/External/job/United-States---Boston-Office/Software-Engineer-Intern--Container-_JR100491"
-    test3_url = "https://lifeattiktok.com/search/7533388869200333074"
-
-    if not test_url.strip():
-        print("Set test_url in main() to run the scraping smoke test.")
-        return
-
-    scraped_text = scrape_job_page(test_url)
-    if not scraped_text:
-        print("Scrape failed or returned no content.")
-        return
-
-    print("Scrape succeeded.")
-    print(f"Extracted characters: {len(scraped_text)}")
-    print("Preview (first 2000 chars):")
-    print(scraped_text[:2000])
-
-    print("\n--- extract_metadata smoke test ---")
-    metadata = extract_metadata(scraped_text)
-    if metadata:
-        print(f"Company:    {metadata.company_name}")
-        print(f"Title:      {metadata.title}")
-        print(f"Location:   {metadata.location}")
-        print(f"Grad year:  {metadata.required_grad_year}")
-        print(f"Pay:        {metadata.estimated_pay} ({metadata.salary_unit})")
-        print(f"Tech stack: {metadata.tech_stack}")
-        print(f"Visa:       {metadata.sponsors_visa}")
-        print(f"Confidence: {metadata.confidence_score}")
-    else:
-        print("extract_metadata returned None")
-
-    print("\n--- save_to_database smoke test ---")
-    if metadata:
-        db_engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-        job_id = save_to_database(
-            job_stream_data={
-                "url": test_url,
-                "url_hash": "smoketest_hash_billiontoone",
-                "source": "manual",
-                "date_posted": "1748995200",
-            },
-            metadata=metadata,
-            raw_text=scraped_text or "",
-            engine=db_engine,
-        )
-        if job_id:
-            print(f"Saved job UUID: {job_id}")
-        else:
-            print("save_to_database returned None")
-    else:
-        print("Skipped — no metadata to save")
+    wait_for_dependencies()
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    print("worker started — listening on stream")
+    run_consumer_loop(redis_client, engine)
 
 
 if __name__ == "__main__":
