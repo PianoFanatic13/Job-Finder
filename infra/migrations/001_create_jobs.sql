@@ -10,9 +10,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   is_remote BOOLEAN,
   required_grad_year INT,
   grad_year_flexible BOOLEAN DEFAULT FALSE,
-  estimated_salary_low INT,
-  estimated_salary_high INT,
-  salary_unit TEXT CHECK (salary_unit IN ('hourly', 'annual')),
+  estimated_pay_hourly INT,
   tech_stack TEXT[] DEFAULT '{}',
   sponsors_visa BOOLEAN,
   raw_description TEXT,
@@ -26,7 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_url_hash_key ON jobs(url_hash);
 CREATE INDEX IF NOT EXISTS idx_jobs_required_grad_year ON jobs(required_grad_year);
-CREATE INDEX IF NOT EXISTS idx_jobs_estimated_salary_low ON jobs(estimated_salary_low);
+CREATE INDEX IF NOT EXISTS idx_jobs_estimated_pay_hourly ON jobs(estimated_pay_hourly);
 CREATE INDEX IF NOT EXISTS idx_jobs_is_remote ON jobs(is_remote);
 CREATE INDEX IF NOT EXISTS idx_jobs_tech_stack_gin ON jobs USING GIN(tech_stack);
 CREATE INDEX IF NOT EXISTS idx_jobs_date_ingested_desc ON jobs(date_ingested DESC);

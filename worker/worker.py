@@ -602,9 +602,13 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
         if result.required_grad_year is not None and result.required_grad_year not in _VALID_GRAD_YEAR_RANGE:
             result.required_grad_year = None
 
-        if result.estimated_pay is not None and result.salary_unit == "hourly" and result.estimated_pay > _MAX_HOURLY_PAY:
-            result.estimated_pay = None
-            result.salary_unit = None
+        if result.estimated_pay is not None:
+            if result.salary_unit == "hourly" and result.estimated_pay > _MAX_HOURLY_PAY:
+                result.estimated_pay = None
+                result.salary_unit = None
+            elif result.salary_unit == "annual" and result.estimated_pay > _MAX_HOURLY_PAY * 2080:
+                result.estimated_pay = None
+                result.salary_unit = None
 
         if result.tech_stack:
             seen: set[str] = set()
@@ -629,32 +633,31 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
 _UPSERT_SQL = text("""
 INSERT INTO jobs (
     url, url_hash, company_name, title, location, is_remote,
-    required_grad_year, grad_year_flexible, estimated_salary_low,
-    salary_unit, tech_stack, sponsors_visa, raw_description,
+    required_grad_year, grad_year_flexible, estimated_pay_hourly,
+    tech_stack, sponsors_visa, raw_description,
     ai_extraction_status, ai_confidence_score, source,
     date_posted, date_processed
 ) VALUES (
     :url, :url_hash, :company_name, :title, :location, :is_remote,
-    :required_grad_year, :grad_year_flexible, :estimated_salary_low,
-    :salary_unit, :tech_stack, :sponsors_visa, :raw_description,
+    :required_grad_year, :grad_year_flexible, :estimated_pay_hourly,
+    :tech_stack, :sponsors_visa, :raw_description,
     :ai_extraction_status, :ai_confidence_score, :source,
     :date_posted, :date_processed
 )
 ON CONFLICT (url) DO UPDATE SET
-    company_name         = EXCLUDED.company_name,
-    title                = EXCLUDED.title,
-    location             = EXCLUDED.location,
-    is_remote            = EXCLUDED.is_remote,
-    required_grad_year   = EXCLUDED.required_grad_year,
-    grad_year_flexible   = EXCLUDED.grad_year_flexible,
-    estimated_salary_low = EXCLUDED.estimated_salary_low,
-    salary_unit          = EXCLUDED.salary_unit,
-    tech_stack           = EXCLUDED.tech_stack,
-    sponsors_visa        = EXCLUDED.sponsors_visa,
-    raw_description      = EXCLUDED.raw_description,
-    ai_extraction_status = EXCLUDED.ai_extraction_status,
-    ai_confidence_score  = EXCLUDED.ai_confidence_score,
-    date_processed       = EXCLUDED.date_processed
+    company_name          = EXCLUDED.company_name,
+    title                 = EXCLUDED.title,
+    location              = EXCLUDED.location,
+    is_remote             = EXCLUDED.is_remote,
+    required_grad_year    = EXCLUDED.required_grad_year,
+    grad_year_flexible    = EXCLUDED.grad_year_flexible,
+    estimated_pay_hourly  = EXCLUDED.estimated_pay_hourly,
+    tech_stack            = EXCLUDED.tech_stack,
+    sponsors_visa         = EXCLUDED.sponsors_visa,
+    raw_description       = EXCLUDED.raw_description,
+    ai_extraction_status  = EXCLUDED.ai_extraction_status,
+    ai_confidence_score   = EXCLUDED.ai_confidence_score,
+    date_processed        = EXCLUDED.date_processed
 RETURNING id
 """)
 
@@ -682,6 +685,10 @@ def save_to_database(
         date_posted = datetime.fromtimestamp(int(date_posted_str), tz=timezone.utc)
         date_processed = datetime.now(tz=timezone.utc)
 
+        pay = metadata.estimated_pay
+        if pay is not None and metadata.salary_unit == "annual":
+            pay = round(pay / 2080)  # 40 hrs/week × 52 weeks
+
         params = {
             "url": job_stream_data["url"],
             "url_hash": job_stream_data["url_hash"],
@@ -691,8 +698,7 @@ def save_to_database(
             "is_remote": metadata.is_remote,
             "required_grad_year": metadata.required_grad_year,
             "grad_year_flexible": metadata.grad_year_flexible,
-            "estimated_salary_low": metadata.estimated_pay,
-            "salary_unit": metadata.salary_unit,
+            "estimated_pay_hourly": pay,
             "tech_stack": metadata.tech_stack,
             "sponsors_visa": metadata.sponsors_visa,
             "raw_description": raw_text,
@@ -741,18 +747,30 @@ def run_consumer_loop(redis_client, engine) -> None:
 
     processed = 0
     failed = 0
+    drain_pending = True
 
     while True:
-        messages = redis_client.xreadgroup(
-            WORKER_GROUP,
-            WORKER_CONSUMER,
-            {JOBS_RAW_STREAM_KEY: ">"},
-            count=1,
-            block=5000,
-        )
-
-        if not messages:
-            continue
+        if drain_pending:
+            messages = redis_client.xreadgroup(
+                WORKER_GROUP,
+                WORKER_CONSUMER,
+                {JOBS_RAW_STREAM_KEY: "0"},
+                count=1,
+            )
+            if not messages or not messages[0][1]:
+                drain_pending = False
+                print("pending list drained, switching to new messages")
+                continue
+        else:
+            messages = redis_client.xreadgroup(
+                WORKER_GROUP,
+                WORKER_CONSUMER,
+                {JOBS_RAW_STREAM_KEY: ">"},
+                count=1,
+                block=5000,
+            )
+            if not messages:
+                continue
 
         _, entries = messages[0]
         msg_id, fields = entries[0]
@@ -771,8 +789,9 @@ def run_consumer_loop(redis_client, engine) -> None:
             redis_client.xack(JOBS_RAW_STREAM_KEY, WORKER_GROUP, msg_id)
             time.sleep(RATE_LIMIT_SLEEP_SECONDS)
         except RateLimitError as e:
-            print(f"  rate limited — sleeping {e.retry_after}s, message stays pending for retry")
+            print(f"  rate limited — sleeping {e.retry_after}s, will retry this message")
             time.sleep(e.retry_after)
+            drain_pending = True
 
 
 def wait_for_dependencies(max_retries: int = 30, sleep_seconds: int = 2) -> None:
