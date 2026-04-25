@@ -27,12 +27,10 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else No
 redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
 _JOBS_CACHE_TTL = 3600
-_STATS_CACHE_TTL = 900
+_STATS_CACHE_TTL = 3600
 
 
-# ---------------------------------------------------------------------------
 # Response models
-# ---------------------------------------------------------------------------
 
 class JobSummary(BaseModel):
     id: str
@@ -77,11 +75,10 @@ class StatsResponse(BaseModel):
     by_status: Dict[str, int]
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _cache_key(prefix: str, params: dict) -> str:
+    """Stable cache key from sorted params — same filters always hit the same key."""
     raw = json.dumps(params, sort_keys=True)
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"{prefix}:{digest}"
@@ -115,9 +112,7 @@ def _row_to_detail(row) -> dict:
     return d
 
 
-# ---------------------------------------------------------------------------
 # Endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/")
 def root() -> Dict[str, str]:
@@ -166,6 +161,7 @@ def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
 ):
+    # Capture only filter/sort/page params — exclude injected clients which aren't part of the query identity
     cache_params = {k: v for k, v in locals().items() if v is not None and k not in ("engine", "redis_client")}
     key = _cache_key("cache:jobs", cache_params)
 
@@ -176,6 +172,7 @@ def list_jobs(
             data["cache_hit"] = True
             return data
 
+    # Always exclude failed extractions — partial records are included since they still have usable fields
     conditions = ["ai_extraction_status != 'failed'"]
     params: dict = {}
 
@@ -197,6 +194,8 @@ def list_jobs(
     if tech_stack:
         techs = [t.strip().lower() for t in tech_stack.split(",") if t.strip()]
         if techs:
+            # @> is array containment — all requested techs must be present (AND, not OR)
+            # Each tech needs its own bind param; SQLAlchemy text() doesn't support list params
             placeholders = ", ".join(f":tech_{i}" for i in range(len(techs)))
             conditions.append(f"tech_stack @> ARRAY[{placeholders}]::text[]")
             for i, t in enumerate(techs):
@@ -251,6 +250,7 @@ def list_jobs(
     }
 
     if redis_client:
+        # default=str handles datetime serialization since timestamps aren't JSON-native
         redis_client.set(key, json.dumps(response, default=str), ex=_JOBS_CACHE_TTL)
 
     return response
