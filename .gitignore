@@ -7,6 +7,7 @@ __pycache__/
 venv/
 .env
 .env.example
+.claude/
 
 worker/test_worker.py
 worker/check_jobs.py

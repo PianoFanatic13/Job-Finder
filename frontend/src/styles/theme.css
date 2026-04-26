@@ -1,0 +1,40 @@
+:root {
+  /* Palette: Warm Editorial */
+  --color-bg:        #F5F0E8;   /* parchment page canvas */
+  --color-surface-0: #F5F0E8;
+  --color-surface-1: #FFFFFF;   /* panels, cards */
+  --color-surface-2: #F0EAE0;   /* card hover */
+  --color-surface-3: #E8F0FE;   /* selected (blue tint) */
+  --color-border:    #E0D8CC;   /* standard border */
+  --color-border-strong: #C8BDB0;
+
+  --color-accent:       #1D5BDA;   /* cobalt blue */
+  --color-accent-dim:   #1448BE;   /* pressed */
+  --color-accent-light: #DBEAFE;   /* light bg wash */
+  --color-accent-teal:  #0891B2;   /* cyan for pay */
+
+  --color-text-primary:   #1A1624;
+  --color-text-secondary: #5C5470;
+  --color-text-muted:     #A09AB0;
+  --color-text-accent:    #1D5BDA;
+
+  --color-success:  #059669;
+  --color-warning:  #D97706;
+  --color-danger:   #DC2626;
+
+  --font-display: "Syne", system-ui, sans-serif;
+  --font-sans:    "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono:    "IBM Plex Mono", "Fira Code", monospace;
+
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-pill: 999px;
+
+  --shadow-card:  0 1px 3px rgba(26,22,36,0.07), 0 1px 2px rgba(26,22,36,0.04);
+  --shadow-panel: 0 1px 4px rgba(26,22,36,0.08);
+
+  --transition-fast:   150ms ease;
+  --transition-normal: 250ms ease;
+  --transition-slide:  300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
