@@ -8,15 +8,15 @@ from typing import Any, List, Optional
 import httpx
 import redis
 from bs4 import BeautifulSoup
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import create_engine, text
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 JOBS_RAW_STREAM_KEY = os.getenv("JOBS_RAW_STREAM_KEY", "jobs:raw")
 WORKER_GROUP = "worker-group"
 WORKER_CONSUMER = "worker-1"
@@ -90,9 +90,9 @@ def _parse_retry_delay(error_str: str, default: int = 65) -> int:
 
 
 class JobMetadata(BaseModel):
-    company_name: str = Field(description="Company name")
-    title: str = Field(description="Normalized job title")
-    location: List[str] = Field(description="List of locations, include Remote if applicable")
+    company_name: Optional[str] = Field(default=None, description="Company name")
+    title: Optional[str] = Field(default=None, description="Normalized job title")
+    location: Optional[List[str]] = Field(default=None, description="List of locations, include Remote if applicable")
     is_remote: bool = Field(description="True if any location is remote or hybrid")
     required_grad_year: Optional[int] = Field(
         description=(
@@ -108,7 +108,7 @@ class JobMetadata(BaseModel):
     grad_year_flexible: bool = Field(
         description="True if earlier or later graduation years are explicitly accepted"
     )
-    estimated_pay: Optional[int] = Field(
+    estimated_pay: Optional[float] = Field(
         default=None,
         description=(
             "Representative pay amount as an integer for sorting/filtering; "
@@ -116,7 +116,8 @@ class JobMetadata(BaseModel):
         )
     )
     salary_unit: Optional[str] = Field(description="hourly or annual")
-    tech_stack: List[str] = Field(
+    tech_stack: Optional[List[str]] = Field(
+        default=None,
         description=(
             "Normalized list of technologies in lowercase only (e.g., python, "
             "react, kubernetes). Deduplicate obvious variants/synonyms where "
@@ -578,7 +579,7 @@ _MAX_HOURLY_PAY = 500
 
 
 def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata]:
-    """Extract structured job metadata from scraped plain text using Gemini.
+    """Extract structured job metadata from scraped plain text using Groq.
 
     Returns a validated JobMetadata object, or None if extraction fails.
     Pass a pre-built structured_llm to skip LLM construction (useful for testing).
@@ -588,15 +589,19 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
 
     try:
         if structured_llm is None:
-            llm = ChatGoogleGenerativeAI(
-                model=GEMINI_MODEL,
+            llm = ChatGroq(
+                model=GROQ_MODEL,
                 temperature=0,
-                google_api_key=GEMINI_API_KEY,
+                api_key=GROQ_API_KEY,
             )
             structured_llm = llm.with_structured_output(JobMetadata)
 
         prompt = _EXTRACT_PROMPT_TEMPLATE.format(raw_text=raw_text)
         result: JobMetadata = structured_llm.invoke([HumanMessage(content=prompt)])
+
+        # Reject records missing the two non-nullable DB columns — model returned null when page text was insufficient
+        if result.title is None or result.company_name is None:
+            return None
 
         # Hallucination guards
         if result.required_grad_year is not None and result.required_grad_year not in _VALID_GRAD_YEAR_RANGE:
@@ -610,7 +615,7 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
                 result.estimated_pay = None
                 result.salary_unit = None
 
-        if result.tech_stack:
+        if result.tech_stack is not None:
             seen: set[str] = set()
             deduped: List[str] = []
             for tech in result.tech_stack:
@@ -624,7 +629,7 @@ def extract_metadata(raw_text: str, structured_llm=None) -> Optional[JobMetadata
 
     except (ValidationError, Exception) as e:
         err_str = str(e)
-        if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+        if "rate_limit_exceeded" in err_str or "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
             raise RateLimitError(_parse_retry_delay(err_str))
         print(f"extract_metadata failed: {e}")
         return None
@@ -686,20 +691,23 @@ def save_to_database(
         date_processed = datetime.now(tz=timezone.utc)
 
         pay = metadata.estimated_pay
-        if pay is not None and metadata.salary_unit == "annual":
-            pay = round(pay / 2080)  # 40 hrs/week × 52 weeks
+        if pay is not None:
+            if metadata.salary_unit == "annual":
+                pay = round(pay / 2080)  # 40 hrs/week × 52 weeks
+            else:
+                pay = round(pay)  # coerce float hourly values to int
 
         params = {
             "url": job_stream_data["url"],
             "url_hash": job_stream_data["url_hash"],
             "company_name": metadata.company_name,
             "title": metadata.title,
-            "location": metadata.location,
+            "location": metadata.location or [],
             "is_remote": metadata.is_remote,
             "required_grad_year": metadata.required_grad_year,
             "grad_year_flexible": metadata.grad_year_flexible,
             "estimated_pay_hourly": pay,
-            "tech_stack": metadata.tech_stack,
+            "tech_stack": metadata.tech_stack or [],
             "sponsors_visa": metadata.sponsors_visa,
             "raw_description": raw_text,
             "ai_extraction_status": status,
