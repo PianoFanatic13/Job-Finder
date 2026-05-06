@@ -93,7 +93,7 @@ class JobMetadata(BaseModel):
     company_name: Optional[str] = Field(default=None, description="Company name")
     title: Optional[str] = Field(default=None, description="Normalized job title")
     location: Optional[List[str]] = Field(default=None, description="List of locations, include Remote if applicable")
-    is_remote: bool = Field(description="True if any location is remote or hybrid")
+    is_remote: Optional[bool] = Field(default=False, description="True if any location is remote or hybrid")
     required_grad_year: Optional[int] = Field(
         description=(
             "Applicant graduation year requirement only (e.g., 2027). "
@@ -105,7 +105,8 @@ class JobMetadata(BaseModel):
         default=None,
         description="Optional class standing requirements such as freshman, sophomore, junior, senior, masters, or phd"
     )
-    grad_year_flexible: bool = Field(
+    grad_year_flexible: Optional[bool] = Field(
+        default=False,
         description="True if earlier or later graduation years are explicitly accepted"
     )
     estimated_pay: Optional[float] = Field(
@@ -124,7 +125,8 @@ class JobMetadata(BaseModel):
             "possible to avoid duplicates like JavaScript vs JS as separate entries."
         )
     )
-    sponsors_visa: bool = Field(
+    sponsors_visa: Optional[bool] = Field(
+        default=False,
         description="True if H1B or OPT sponsorship is explicitly mentioned"
     )
     confidence_score: float = Field(
