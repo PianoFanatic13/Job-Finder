@@ -1,0 +1,57 @@
+services:
+  api:
+    build:
+      context: ./api
+    container_name: interniq-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ./worker
+    container_name: interniq-worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL}
+      JOBS_RAW_STREAM_KEY: ${JOBS_RAW_STREAM_KEY}
+
+  ingestor:
+    build:
+      context: ./ingestor
+    container_name: interniq-ingestor
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      INGEST_INTERVAL_SECONDS: ${INGEST_INTERVAL_SECONDS}
+      LISTINGS_FETCH_TIMEOUT_SECONDS: ${LISTINGS_FETCH_TIMEOUT_SECONDS}
+      SIMPLIFY_LISTINGS_URL: ${SIMPLIFY_LISTINGS_URL}
+      VANSH_LISTINGS_URL: ${VANSH_LISTINGS_URL}
+      JOBS_PROCESSED_SET_KEY: ${JOBS_PROCESSED_SET_KEY}
+      JOBS_RAW_STREAM_KEY: ${JOBS_RAW_STREAM_KEY}
+      JOBS_RAW_STREAM_MAXLEN: ${JOBS_RAW_STREAM_MAXLEN}
+      INGEST_LOG_DIR: /app/logs
+    volumes:
+      - ingestor_logs:/app/logs
+
+volumes:
+  ingestor_logs:
