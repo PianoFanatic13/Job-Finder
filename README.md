@@ -30,7 +30,7 @@ GitHub sources ──► Ingestor ──► Redis Stream ──► Worker (LangC
 | **Ingestor** | Polls community GitHub repos every 6 hours, normalizes listings, deduplicates URLs via SHA-256 hashing in a Redis Set, and publishes new jobs to a Redis Stream.                           |
 | **Worker**   | Consumes the Redis Stream, scrapes each job URL, and uses a LangChain agent backed by Groq's LLM to extract structured metadata. Persists results to PostgreSQL with hallucination guards. |
 | **API**      | FastAPI service exposing filterable, paginated endpoints. Caches query results in Redis with a 1-hour TTL to reduce database load.                                                         |
-| **Frontend** | React + TypeScript dashboard with filter controls, paginated job cards, and a detail panel. Deployed to Vercel; API calls are proxied server-side to EC2 via `vercel.json` rewrites.       |
+| **Frontend** | React + TypeScript dashboard with filter controls, paginated job cards, and a detail panel. Deployed to Vercel;                                                                            |
 
 ## Features
 
@@ -53,14 +53,12 @@ GitHub sources ──► Ingestor ──► Redis Stream ──► Worker (LangC
 
 ## Deployment Architecture
 
-| Component         | Service                                | Notes                                                                                                                                                              |
-| ----------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Backend host      | AWS EC2 `t2.micro` (Amazon Linux 2023) | Runs api, worker, and ingestor as Docker containers via `docker-compose.prod.yml`. Auto-restart on reboot via a systemd unit.                                      |
-| Database          | AWS RDS PostgreSQL `db.t4g.micro`      | Managed instance with SSL required (`sslmode=require`). Schema applied via `infra/migrations/001_create_jobs.sql`.                                                 |
-| Cache & queue     | AWS ElastiCache Redis `cache.t3.micro` | Managed Redis. Stores the dedup Set, the work Stream, and API response cache keys.                                                                                 |
-| Frontend          | Vercel (static hosting)                | Vite build deployed to Vercel edge. `vercel.json` rewrites proxy `/api/*` server-side to the EC2 Elastic IP, sidestepping the HTTPS-to-HTTP mixed content problem. |
-| Visitor analytics | Vercel Analytics                       | Pageviews, top pages, and referrer tracking via `@vercel/analytics`.                                                                                               |
-| Networking        | AWS Security Groups                    | EC2 SG allows SSH from a single IP and port 8000 from the public internet. RDS and Redis SGs only accept traffic from the EC2 security group.                      |
+| Component     | Service                                | Notes                                                                |
+| ------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| Backend host  | AWS EC2 `t2.micro`                     | Runs api, worker, and ingestor as Docker containers.                 |
+| Database      | AWS RDS PostgreSQL `db.t4g.micro`      | Managed PostgreSQL instance.                                         |
+| Cache & queue | AWS ElastiCache Redis `cache.t3.micro` | Managed Redis for deduplication, work queue, and API response cache. |
+| Frontend      | Vercel (static hosting)                | Vite build deployed to Vercel; proxies API calls to EC2.             |
 
 ## Repository Layout
 
@@ -71,7 +69,6 @@ GitHub sources ──► Ingestor ──► Redis Stream ──► Worker (LangC
 ├── worker/                         LangChain AI extraction worker
 ├── ingestor/                       Scheduled GitHub source fetcher
 ├── infra/migrations/               PostgreSQL schema migrations
-├── docker-compose.yml              Local development (api/worker/ingestor + postgres + redis)
 └── docker-compose.prod.yml         Production compose (api/worker/ingestor only — managed AWS services for data)
 ```
 
@@ -79,7 +76,7 @@ GitHub sources ──► Ingestor ──► Redis Stream ──► Worker (LangC
 
 Future or potential features:
 
-- **More sources for job listings** - Currently uses two main repos for internship listings, Pitt CSC and Vansh. However it's recognized that there's a lot of jobs not posted on these repos and posted elsewhere like LinkedIn and Handshake. Scraping from those sites is definitely a challeneg due to their anti-botting safeguards. Nonetheless we will try 😅
+- **More sources for job listings** - Currently uses two main repos for internship listings, Pitt CSC and Vansh. However it's recognized that there's a lot of jobs not posted on these repos and posted elsewhere like LinkedIn and Handshake. Scraping from those sites is definitely a challenge due to their anti-botting safeguards. Nonetheless we will try 😅
 - **RAG resume matcher** — Find most similar jobs based on uploaded resume
 - **Nightly re-extraction agent** — A scheduled job that re-runs the LangChain agent on records flagged as `partial` or with low confidence scores, using a stronger model.
 - **ReAct agent migration for failure mode processing** — Move from the current single-shot extraction loop to a full ReAct agent that can reason about scrape failures, retry with different URL variations, and self-correct job data when extraction confidence is low.
